@@ -1,0 +1,15 @@
+weread-exporter (本仓库)
+=======================
+
+本仓库是 GitHub 用户 **drunkdream** 的项目 `weread-exporter` 的个人复刻副本。
+
+原始项目:
+  - 仓库: https://github.com/drunkdream/weread-exporter
+  - 作者: drunkdream <drunkdream@qq.com>
+  - 协议: MIT License
+
+本仓库基于该项目的 **v0.1.0 快照（约 2024-03 下载）**，并附带极少量本地改动
+（详见 README.md 末尾「本仓库相对原版的改动」一节；本地临时测试脚本 `aaaa.py` 已排除、不纳入版本库）。
+
+原作者的著作权归 drunkdream 所有。本复刻仅用于个人学习与研究，遵守 MIT License。
+如与原项目许可条款冲突，以原项目仓库为准。

@@ -1,0 +1,18 @@
+build/
+cache/
+dist/
+output/
+*.pyc
+*.epub
+*.pdf
+*.md
+*.log
+*.egg-info/
+
+# IDE / personal
+.idea/
+# 本地放置的 Chromium 二进制（约15MB），pyppeteer 自带机制会管理 Chromium，不纳入版本库
+weread_exporter/bin/win32/chrome.exe
+
+# 放行本仓库说明文档：上面 *.md 会忽略导出的书籍 .md，但不应忽略 README
+!README.md
