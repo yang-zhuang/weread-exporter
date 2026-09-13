@@ -2,17 +2,33 @@ build/
 cache/
 dist/
 output/
+# 接管模式（launch_chrome.py）的 Chrome profile：里面有微信读书登录态，绝不能进仓库
+data/
 *.epub
 *.pdf
 *.md
 *.log
+# 日志轮转产物（webpage.py 的 console 日志超过 4MB 会轮转成 .log.1）
+*.log.*
 *.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# 调试产物：webpage.py 在 wait_for_selector 超时时会自动 dump 页面，
+# screenshot() 会写截图。这些不是源码，别进仓库。
+webpage.html
+screenshot.jpg
+*.png
+!weread_exporter/**/*.png
 
 # Python
 *.pyc
 *.pyo
 *.pyd
 __pycache__/
+.pytest_cache/
 *.so
 *.egg
 *.egg-info/
