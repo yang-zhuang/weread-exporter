@@ -22,16 +22,18 @@ def find_packages():
     return packages
 
 
+# 本仓库是 drunkdream/weread-exporter 的 fork：url / author 指向本 fork，
+# 原作者与上游的版权信息见 LICENSE 与 README 的「许可」一节。
 setuptools.setup(
-    author="drunkdream",
-    author_email="drunkdream@qq.com",
+    author="yang-zhuang",
+    author_email="18372513320@163.com",
     name="weread-exporter",
     license="MIT",
-    description="Export weread books to epub/pdf/mobi format.",
+    description="Export weread books to md/epub/pdf/mobi/txt format.",
     version=weread_exporter.VERSION,
     long_description=README,
     long_description_content_type="text/markdown",
-    url="https://github.com/drunkdream/weread-exporter",
+    url="https://github.com/yang-zhuang/weread-exporter",
     packages=find_packages(),
     python_requires=">=3.7",
     install_requires=REQUIREMENTS,

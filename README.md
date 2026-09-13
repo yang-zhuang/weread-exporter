@@ -11,14 +11,14 @@
 
 - 上游仓库：<https://github.com/drunkdream/weread-exporter>
 - 本 fork：<https://github.com/yang-zhuang/weread-exporter>
-- 上游许可：**MIT**（声明于 `setup.py` 的 `license="MIT"`）
+- 许可：**MIT**。上游只把许可写在 `setup.py` 的 `license="MIT"` 字段里、并未附协议全文；本仓库补齐了 [`LICENSE`](LICENSE)，版权行保留原作者，另列本 fork 的修改
 - 本仓库的本地基线：上游提交 [`80a9ccb`](https://github.com/drunkdream/weread-exporter/commit/80a9ccb01647951cfac70f4554eb7741089f0263) *Fixed the command to start Chrome under Arch Linux (#121)*（2026-03-21）
 
 上游共有 88 个提交，作者包括 **drunkdream**（56）、**shadowyang**（29）、Jiancong Zhu、Hu Jin、Mingxi Wu。**本仓库上游部分的版权归原作者所有，按 MIT 条款使用。**
 
 ## 本仓库相对上游做了什么
 
-以下相对上游基线 `80a9ccb` 统计（`git diff HEAD --stat`）：**代码与配置合计 +609 / −223 行**，另新增 5 个 `.py` 文件与 1 个 `scripts/` 目录（16 个 `.sh`）。
+以下相对上游基线 `80a9ccb` 统计（`git diff HEAD --stat`）：**代码与配置合计 +640 / −227 行**，另新增 5 个 `.py` 文件、1 个 `LICENSE` 与 1 个 `scripts/` 目录（16 个 `.sh`）。
 
 > 统计不含本文档自身——README 的增删是自指的，写进来会随文档更新立刻过期。
 
@@ -31,6 +31,7 @@
 | `weread_exporter/injections.py` | 85 | 注入浏览器的 JS 常量（stealth 补丁、headless/验证码探测） |
 | `tests/test_weread_exporter.py` | 449 | 回归测试，29 项，无网络无浏览器 |
 | `launch_chrome.py` | 115 | 接管模式：启动带调试端口的常驻 Chrome |
+| `LICENSE` | 25 | MIT 协议全文。上游只声明了 `license="MIT"` 却没附全文，本仓库补齐；版权行保留原作者 `drunkdream`，另列本 fork 的修改 |
 | `scripts/*.sh` | 各 7~14 行 | 常用命令封装：注释头（用途 / 用法 / 逐参数解释）+ 一行 `python ...` 命令，覆盖本文档出现的全部用法（见「常用命令脚本」） |
 
 ### 修改文件
@@ -43,6 +44,7 @@
 | `weread_exporter/utils.py` | +8 / −0 | 新增 `RiskControlError` 异常 |
 | `README.md` | 本文档扩充 | 新增「来历与致谢」「相对上游的改动」「代码组织结构」三节，并把「常用命令脚本」扩成全部 16 个脚本的对照表 |
 | `.gitignore` | +16 / −0 | 忽略调试产物、日志轮转产物、pytest 缓存、接管模式的 Chrome profile（`data/`，含登录态） |
+| `setup.py` | +6 / −4 | `url` / `author` / `author_email` 从上游改指本 fork；`description` 补全实际支持的 5 种格式（`md/epub/pdf/mobi/txt`） |
 | `.gitmodules` | −3 / −0 | 删除（详见文末「已删除的配置」） |
 
 ### 功能层面的改动
@@ -137,8 +139,9 @@ weread-exporter/
 │  └─ run-all-tests.sh                 跑全部测试（pytest）
 ├─ launch_chrome.py             115 行  接管模式：启动常驻 Chrome（--remote-debugging-port）
 ├─ build.py                     128 行  上游的 PyInstaller 打包脚本
-├─ setup.py                      58 行  上游的安装脚本（MIT 声明在此）
+├─ setup.py                      60 行  安装脚本（`url`/`author` 已指向本 fork）
 ├─ requirements.txt
+├─ LICENSE                             MIT 协议全文（版权行保留原作者 drunkdream）
 └─ README.md
 ```
 
@@ -457,9 +460,17 @@ $ git ls-files -s cache              # 无输出 → git 索引里根本没有 c
 
 ## 许可
 
-本仓库遵循上游的 **MIT** 许可，上游部分（原作者 **drunkdream** 及全部贡献者）的版权归原作者所有。
+本仓库遵循 **MIT** 许可，协议全文见 [`LICENSE`](LICENSE)。上游部分（原作者 **drunkdream** 及全部贡献者）的版权归原作者所有，本仓库修改部分的版权归本 fork 作者。`LICENSE` 的版权行分两段：
 
-> ⚠️ 注意：仓库里当前**没有 `LICENSE` 文件**——MIT 声明只写在 `setup.py` 的 `license="MIT"` 字段中。若要作为独立项目对外分发，建议补一份 `LICENSE` 全文。
+```
+Copyright (c) 2023 drunkdream (upstream project)
+Copyright (c) 2026 yang-zhuang (modifications in this fork)
+```
+
+两点说明：
+
+- **年份 2023 的依据**：上游仓库的起始提交是 `2023-02-11` 的 *Initial commit*（`GET /repos/drunkdream/weread-exporter/commits?until=2023-03-01`）。
+- **为什么要补全文**：上游只在 `setup.py` 里写了 `license="MIT"`，**从未附协议全文**——GitHub API 的 `GET /repos/drunkdream/weread-exporter/license` 返回 404，仓库根目录也没有 `LICENSE` 文件。而 MIT 条款本身就要求"上述版权声明和许可声明应包含在软件的**所有副本**中"，fork 对外分发正是"副本"，所以补一份全文既是合规要求，也让下游使用者有据可依。
 
 ## 免责申明
 
