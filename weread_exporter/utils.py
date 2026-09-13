@@ -38,6 +38,14 @@ class LoginRequiredError(RuntimeError):
     pass
 
 
+class RiskControlError(RuntimeError):
+    """被风控拦截（验证码 / 访问频繁），需要人工介入。
+
+    与 LoadChapterFailedError 的区别：后者是加载失败，重试可能有效；
+    前者重试只会再次撞上同样的验证码，所以必须立即中止而不是重试。
+    """
+
+
 def check_cairo_installed() -> None:
     """检查cairo是否安装，如果未安装则抛出异常并提示安装方法
 

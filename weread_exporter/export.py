@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
 import time
 from typing import Dict, List, Optional, Any
@@ -13,7 +14,6 @@ import bs4
 import markdown
 
 from ebooklib import epub
-from weasyprint import HTML, CSS
 
 from . import utils
 
@@ -26,6 +26,85 @@ if TYPE_CHECKING:
     from .webpage import WeReadWebPage
 
 current_path = os.path.dirname(os.path.abspath(__file__))
+
+# 免登录/试读模式下，付费章页面渲染的是购买提示而不是正文。
+# 特征词 + 短内容双条件判定，避免把购买提示当正文落盘（免费章正文通常很长）。
+_PAYWALL_MARKERS = (
+    "购买本章",
+    "解锁本章",
+    "需要购买",
+    "本章为付费",
+    "付费内容",
+    "购买后阅读",
+    "本章需付费",
+    "会员专享",
+    "试读结束",
+    "开通会员",
+)
+
+
+def is_paywall_text(content: str) -> bool:
+    """启发式判断：内容为空或极短且含付费特征词 → 付费墙，应跳过该章。"""
+    text = (content or "").strip()
+    if not text:
+        return True  # 空内容视作拿不到正文
+    if len(text) >= 300:
+        return False  # 正常章节正文不可能这么短
+    return any(m in text for m in _PAYWALL_MARKERS)
+
+
+def human_detail(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """把 get_book_info 的完整元数据转成中文人读版（写进每本书的 详情.json）。
+
+    meta 即 cache/<book_id>/meta.json 的内容（含 title/author/chapters 及
+    category/publisher/isbn/评分等详情页字段）。chapters 太大，人读版不包含。
+    """
+    rating = meta.get("ratingDetail") or {}
+    new_rating = meta.get("newRatingDetail") or {}
+    cats = meta.get("categories") or []
+    cat_titles = "、".join(c.get("title") or "" for c in cats) or meta.get("category") or ""
+    ranklist = meta.get("ranklist") or {}
+    cent_price = meta.get("centPrice")
+    return {
+        "书名": meta.get("title"),
+        "作者": meta.get("author"),
+        "分类": cat_titles,
+        "标签": meta.get("tags"),
+        "出版社": meta.get("publisher"),
+        "出版时间": meta.get("publishTime"),
+        "ISBN": meta.get("isbn"),
+        "定价(元)": meta.get("publishPrice")
+        or (cent_price / 100 if isinstance(cent_price, (int, float)) else None),
+        "总字数": meta.get("totalWords"),
+        "是否完结": "是" if meta.get("finished") else "否",
+        "免费章节数": meta.get("maxFreeChapter"),
+        "章节总数": meta.get("chapterSize") or meta.get("lastChapterIdx"),
+        "推荐值": (
+            meta.get("newRating") / 10
+            if isinstance(meta.get("newRating"), (int, float))
+            else meta.get("newRating")
+        ),
+        "评分人数": meta.get("newRatingCount") or meta.get("ratingCount"),
+        "评分标签": new_rating.get("title"),
+        "评分分布": {
+            "好评": new_rating.get("good"),
+            "中评": new_rating.get("fair"),
+            "差评": new_rating.get("poor"),
+            "深V用户数": new_rating.get("deepV"),
+            "近期评分": new_rating.get("recent"),
+            "五星/四星/三星/二星/一星": [
+                rating.get(k) for k in ("five", "four", "three", "two", "one")
+            ],
+        },
+        "所在榜单": ranklist.get("categoryName"),
+        "上榜序号": ranklist.get("seq"),
+        "书籍ID": meta.get("bookId"),
+        "阅读ID": meta.get("encodeId"),
+        "格式": meta.get("format"),
+        "语言": meta.get("language"),
+        "更新时间(时间戳)": meta.get("updateTime"),
+        "简介": meta.get("intro"),
+    }
 
 
 class WeReadExporter(object):
@@ -56,8 +135,9 @@ class WeReadExporter(object):
 
         if not os.path.isfile(self._meta_path):
             self._meta_data = await self._page.get_book_info()
-            with open(self._meta_path, "w") as fp:
-                fp.write(json.dumps(self._meta_data))
+            with open(self._meta_path, "w", encoding="utf-8") as fp:
+                # ensure_ascii=False：中文直接写，人读 meta.json 不再是 \uXXXX 转义
+                fp.write(json.dumps(self._meta_data, ensure_ascii=False))
         else:
             with open(self._meta_path) as fp:
                 text = fp.read()
@@ -128,8 +208,8 @@ class WeReadExporter(object):
                     with open(os.path.join(self._image_dir, image_name), "wb") as fp:
                         fp.write(data)
                     output = output[: pos + 2] + "images/" + image_name + output[pos1:]
-            if not os.path.isfile(chapter_path + ".bak"):
-                os.rename(chapter_path, chapter_path + ".bak")
+            # 直接写替换后的最终内容，不再保留 .bak 冗余快照。
+            # 旧版 .bak 保留「替换前」的远程 URL，与最终 .md 并存会让人误以为图片未本地化。
             with open(chapter_path, "wb") as fp:
                 fp.write(output.encode())
 
@@ -170,6 +250,9 @@ class WeReadExporter(object):
         image_format: str = "jpg",
         dump_html: bool = False,
     ) -> None:
+        # weasyprint 只在 PDF 转换时需要，延迟导入避免 -o md/epub 也拉重依赖
+        from weasyprint import HTML, CSS
+
         meta_data = await self._load_meta_data()
         raw_html: str = '<img src="cover.jpg" style="width: 100%;">\n'
         for index, chapter in enumerate(meta_data["chapters"]):
@@ -329,14 +412,71 @@ class WeReadExporter(object):
         with open(self._cover_image_path, "wb") as fp:
             fp.write(data)
 
-    async def export_markdown(self, timeout: int = 60, interval: int = 30) -> None:
+    async def export_markdown(
+        self,
+        timeout: int = 60,
+        interval: int = 30,
+        jitter: int = 5,
+        shuffle: bool = True,
+        max_chapters: int = 0,
+    ) -> None:
+        """逐章导出 markdown。
+
+        interval 是章节之间的基准间隔，jitter 是叠加在上面的正负随机抖动。
+        固定 30 秒一章的节拍本身就是一个机器特征，抖动后平均值不变但去掉了周期性。
+
+        shuffle 为 True 时打乱章节的抓取顺序：真人极少严格 1→N 顺读，线性抓取
+        本身就是一个自动化信号。每章写入仍用它在书中的原始下标命名，因此最终
+        文件与导出的 epub/pdf 顺序完全不受影响，只是向服务器的请求顺序不再线性。
+
+        max_chapters > 0 时只抓书的前 N 章（测试/风控模式），此时强制不 shuffle：
+        书的开头通常是免费试读章，按序取才能保证抓到的不是付费墙后面的章。
+        """
         if not os.path.isdir(self._chapter_dir):
             os.makedirs(self._chapter_dir)
         meta_data = await self._load_meta_data()
         if not os.path.isfile(self._cover_image_path):
             await self.save_cover_image()
 
-        for index, chapter in enumerate(meta_data["chapters"]):
+        chapters = meta_data["chapters"]
+        # maxFreeChapter 元数据：书的免费章集中在开头（前 mf 个章节位置），
+        # 边界可能 ±1，由运行时的付费墙检测兜底。免费区的章优先抓。
+        free_limit = None
+        mf = meta_data.get("maxFreeChapter")
+        if isinstance(mf, int) and mf > 0:
+            free_limit = min(mf, len(chapters))
+
+        order = list(range(len(chapters)))
+        if max_chapters and max_chapters > 0:
+            if free_limit:
+                free_zone = [i for i in order if i < free_limit]
+                order = free_zone[:max_chapters] or order[:max_chapters]
+            else:
+                order = order[:max_chapters]
+        elif shuffle:
+            random.shuffle(order)
+            if free_limit:
+                # 免费区优先：免费区的随机序放前面，付费区随机序垫底
+                free_part = [i for i in order if i < free_limit]
+                paid_part = [i for i in order if i >= free_limit]
+                order = free_part + paid_part
+            logging.info(
+                "[%s] 已打乱章节抓取顺序（共 %d 章），写入仍按原序"
+                % (self.__class__.__name__, len(order))
+            )
+        if len(order) < len(chapters):
+            logging.info(
+                "[%s] 限量模式：只抓 %d 章（共 %d 章，免费区优先）"
+                % (self.__class__.__name__, len(order), len(chapters))
+            )
+
+        # 队列化循环：撞到付费墙后把剩余顺序重排——比首个付费章更靠前的
+        # 未抓章节优先（免费章集中在书的前部，往回找比往后找命中率高）
+        queue = list(order)
+        paywall_seen = False
+        while queue:
+            index = queue.pop(0)
+            chapter = chapters[index]
             logging.info(
                 "[%s] Check chapter %s/%s"
                 % (self.__class__.__name__, chapter["id"], chapter["title"])
@@ -353,13 +493,17 @@ class WeReadExporter(object):
             for _ in range(3):
                 time0 = time.time()
                 try:
-                    await asyncio.wait_for(
-                        self._page.goto_chapter(
-                            chapter["id"],
-                            timeout=timeout,
-                        ),
-                        timeout=timeout + 60,
-                    )  # avoid pyppeteer hangs
+                    # 不用 asyncio.wait_for 包裹：goto_chapter 内部每步都有超时
+                    # （goto / 撞码等待 / 按钮等待），wait_for 超时会在 CDP 请求
+                    # 拦截处理中途取消任务，被拦截的请求永远挂起，页面后续
+                    # 加载全部卡死（hook 脚本也加载不了）
+                    await self._page.goto_chapter(
+                        chapter["id"],
+                        timeout=timeout,
+                    )
+                except utils.RiskControlError:
+                    # 撞验证码重试没有意义，只会再等一轮超时，直接往上抛
+                    raise
                 except asyncio.TimeoutError:
                     logging.warning(
                         "[%s] Load chapter %s timeout %ds"
@@ -385,6 +529,29 @@ class WeReadExporter(object):
                 )
 
             markdown_content = await self._page.get_markdown()
+            if is_paywall_text(markdown_content):
+                logging.warning(
+                    "[%s] Chapter %s 疑似付费墙，跳过（免费章节上限之外）"
+                    % (self.__class__.__name__, chapter["title"])
+                )
+                if not paywall_seen:
+                    paywall_seen = True
+                    # 回退：剩余顺序改为「比首个付费章更靠前的未抓章节优先，
+                    # 随机」——免费章集中在书的前部，往回找比往后找命中率高；
+                    # 前面的抓完再考虑后面的
+                    before = [i for i in queue if i < index]
+                    after = [i for i in queue if i > index]
+                    random.shuffle(before)
+                    queue = before + after
+                    if before:
+                        logging.info(
+                            "[%s] 付费墙后回退：优先尝试更靠前的 %d 个未抓章节"
+                            % (self.__class__.__name__, len(before))
+                        )
+                await asyncio.sleep(
+                    max(0.0, interval + random.uniform(-jitter, jitter))
+                )
+                continue
             logging.info(
                 "[%s] Export chapter %s to %s"
                 % (self.__class__.__name__, chapter["title"], file_path)
@@ -392,4 +559,4 @@ class WeReadExporter(object):
             with open(file_path, "wb") as fp:
                 fp.write(markdown_content.encode("utf-8", errors="replace"))
 
-            await asyncio.sleep(interval)
+            await asyncio.sleep(max(0.0, interval + random.uniform(-jitter, jitter)))

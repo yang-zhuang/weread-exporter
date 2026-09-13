@@ -19,22 +19,32 @@ import pyppeteer
 
 from . import webproxy
 from . import utils
+from . import injections
 
 if sys.version_info >= (3, 8):
     from typing import TYPE_CHECKING
 else:
     from typing_extensions import TYPE_CHECKING
 
-
-DETECT_HEADLESS_SCRIPT = """
-const webdriver = navigator.webdriver === true;
-const chromeObj = typeof window.chrome !== "undefined";
-const pluginCount = navigator.plugins.length;
-const languageCount = navigator.languages ? navigator.languages.length : 0;
-const headlessUA = /HeadlessChrome/.test(navigator.userAgent);
-const zeroOuterSize = (window.outerWidth === 0 && window.outerHeight === 0);
-webdriver || !chromeObj || pluginCount === 0 || languageCount === 0  || headlessUA || zeroOuterSize;
-"""
+# 只在 body 可见文本里判定的强风控信号。
+# 刻意不包含裸的"验证码"三个字 —— 登录组件上的"获取验证码"按钮会造成误报。
+VERIFY_TEXT_MARKERS = (
+    "滑动验证",
+    "拖动滑块",
+    "拖动下方滑块",
+    "完成下方验证",
+    "人机验证",
+    "安全验证",
+    "请完成验证",
+    "操作频繁",
+    "访问过于频繁",
+    "操作过于频繁",
+    "请稍后再试",
+    "账号异常",
+    "帐号异常",
+    "存在异常",
+    "风险提示",
+)
 
 
 class WeReadWebPage(object):
@@ -48,6 +58,8 @@ class WeReadWebPage(object):
         book_id: str,
         cookie_path: Optional[str] = None,
         webcache_path: Optional[str] = None,
+        verify_timeout: int = 600,
+        no_login: bool = False,
     ) -> None:
         self._book_id: str = book_id
         self._cookie_path: Optional[str] = cookie_path
@@ -65,24 +77,37 @@ class WeReadWebPage(object):
         )
         self._browser: Optional[pyppeteer.browser.Browser] = None
         self._page: Optional[pyppeteer.page.Page] = None
+        # 免登录模式：不读/不写 cookie、不登录，只下载免费章节（实测正文接口
+        # 不校验登录态，免费章节无登录即可读全文）。账号层面零封号风险。
+        self._no_login: bool = no_login
         self._load_cookie()
         self._url: str = ""
         self._proxy_installed: bool = False
+        # True 表示浏览器是接管来的，close() 只能断开不能关闭
+        self._cdp_attached: bool = False
+        # 撞到验证码时等待人工过码的最长时间（秒）
+        self._verify_timeout: int = verify_timeout
+        # console 日志去重状态：上一条原文 + 它已连续重复的次数
+        self._last_console_line: str = ""
+        self._console_repeat: int = 0
 
     async def get_book_info(self) -> Dict[str, Any]:
         html = (await utils.fetch(self._home_url)).decode()
-        pos1 = html.find("window.__INITIAL_STATE__")
+        marker = "window.__INITIAL_STATE__="
+        pos1 = html.find(marker)
         if pos1 <= 0:
             raise RuntimeError("Unexpected html: %s" % html)
-        pos1 = html.find("=", pos1)
-        pos2 = html.find("};", pos1)
-        data = html[pos1 + 1 : pos2 + 1].strip()
-        data = json.loads(data)
+        seg = html[pos1 + len(marker):]
+        pos2 = seg.find("</script>")
+        if pos2 > 0:
+            seg = seg[:pos2]
+        data, _ = json.JSONDecoder().raw_decode(seg)
+        bi: Dict[str, Any] = data["reader"]["bookInfo"]
         book_info: Dict[str, Any] = {}
-        book_info["title"] = data["reader"]["bookInfo"]["title"]
-        book_info["author"] = data["reader"]["bookInfo"]["author"]
-        book_info["cover"] = data["reader"]["bookInfo"]["cover"]
-        book_info["intro"] = data["reader"]["bookInfo"]["intro"]
+        book_info["title"] = bi["title"]
+        book_info["author"] = bi["author"]
+        book_info["cover"] = bi["cover"]
+        book_info["intro"] = bi["intro"]
         book_info["chapters"] = []
         for chapter in data["reader"]["chapterInfos"]:
             chap = {
@@ -96,6 +121,26 @@ class WeReadWebPage(object):
                 for it in chapter["anchors"]:
                     chap["anchors"].append({"title": it["title"], "level": it["level"]})
             book_info["chapters"].append(chap)
+        # 详情页（首页）完整元数据：分类/出版社/ISBN/价格/字数/评分/榜单等。
+        # 平铺常用字段 + 保留原始 bookInfo 到 book_info 键，避免丢任何字段。
+        for key in (
+            "bookId", "deepLink", "encodeId", "category", "categories",
+            "publisher", "publishTime", "isbn", "price", "originalPrice",
+            "centPrice", "unitPrice", "publishPrice", "totalWords",
+            "star", "ratingCount", "newRating", "newRatingCount",
+            "ratingDetail", "newRatingDetail", "finished", "maxFreeChapter",
+            "maxFreeInfo", "lastChapterIdx", "chapterSize", "format",
+            "language", "updateTime", "onTime", "bookStatus", "payingStatus",
+            "payType", "free", "ispub", "ranklist", "copyrightInfo",
+            "authorSeg", "hasLecture", "beginningChapterUid", "version",
+        ):
+            if key in bi:
+                book_info[key] = bi[key]
+        book_info["book_info"] = bi
+        # 书籍标签（reader.bookTags）
+        tags = data["reader"].get("bookTags")
+        if tags:
+            book_info["tags"] = tags
         return book_info
 
     async def get_user_info(self) -> Dict[str, Any]:
@@ -140,6 +185,9 @@ class WeReadWebPage(object):
 
     def _load_cookie(self) -> None:
         self._cookie = {}
+        if self._no_login:
+            # 免登录模式：不读任何 cookie 文件，也不向页面注入登录态
+            return
         if not self._cookie_path or not os.path.isfile(self._cookie_path):
             return
         with open(self._cookie_path) as fp:
@@ -196,6 +244,18 @@ class WeReadWebPage(object):
                 if os.path.isfile(os.path.join(path, chrome)):
                     return chrome
 
+        if sys.platform == "win32":
+            # PATH 里没有的话，兜底常见安装路径（Chrome 默认装在 Program Files）
+            for candidate in (
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(
+                    r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+                ),
+            ):
+                if os.path.isfile(candidate):
+                    return candidate
+
         if sys.platform == "darwin":
             chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
             if os.path.isfile(chrome):
@@ -232,6 +292,87 @@ class WeReadWebPage(object):
             pass
         return None
 
+    async def _resolve_ws_endpoint(self, endpoint: str) -> str:
+        """把 http://127.0.0.1:9222 这样的调试地址解析成 ws:// 地址。
+
+        已经带 ws:// / wss:// 前缀的原样返回，方便直接粘贴 DevTools 里的完整地址。
+        """
+        if endpoint.startswith("ws://") or endpoint.startswith("wss://"):
+            return endpoint
+        url = endpoint.rstrip("/") + "/json/version"
+        data = await utils.fetch(url)
+        info = json.loads(data.decode())
+        ws_url = info.get("webSocketDebuggerUrl", "")
+        if not ws_url:
+            raise RuntimeError(
+                "CDP 地址 %s 没有返回 webSocketDebuggerUrl，"
+                "请确认 Chrome 带了 --remote-debugging-port 启动" % endpoint
+            )
+        return ws_url
+
+    async def _find_or_create_page(self) -> Any:
+        """接管模式下挑一个页面：优先复用已经停在微信读书的标签页。"""
+        for page in await self._browser.pages():
+            if self.__class__.root_url in (page.url or ""):
+                logging.info(
+                    "[%s] 复用已有标签页 %s" % (self.__class__.__name__, page.url)
+                )
+                return page
+        return await self._browser.newPage()
+
+    async def _attach_browser(
+        self, cdp_endpoint: str, force_login: bool = False, no_login: bool = False
+    ) -> None:
+        """接管一个已经启动、并且人工登录过的 Chrome。
+
+        这是降低风控风险的关键路径。和 launch 模式有三处刻意的不同：
+
+        1. 不自己起浏览器 —— 复用用户窗口的真实指纹和长期 cookie，
+           避开"临时 profile + 注入 cookie"那种新设备挂老身份的组合。
+        2. 不打 stealth 补丁 —— 真实浏览器本来就没有自动化痕迹，
+           反过来覆盖 navigator.webdriver / hasOwnProperty 只会多一处异常特征。
+        3. 不覆盖 viewport —— 保持标签页正常可见，人工过验证码时看得见页面。
+        """
+        ws_endpoint = await self._resolve_ws_endpoint(cdp_endpoint)
+        logging.info("[%s] Attach to CDP %s" % (self.__class__.__name__, ws_endpoint))
+        self._browser = await pyppeteer.connect(browserWSEndpoint=ws_endpoint)
+        self._cdp_attached = True
+        self._page = await self._find_or_create_page()
+
+        await self._page.goto(
+            self._home_url, waitUntil="domcontentloaded", timeout=30000
+        )
+        if no_login:
+            # 免登录模式：不读浏览器 cookie、不验证登录态
+            self._cookie = {}
+        else:
+            # 把浏览器里的真实 cookie 读回来存盘，供 utils.fetch 那一路请求复用
+            await self._update_cookie()
+            if self._cookie.get("wr_vid"):
+                self._save_cookie()
+                try:
+                    user_info = await self.get_user_info()
+                except utils.InvalidUserError as ex:
+                    logging.warning(
+                        "[%s] Get user error: %s" % (self.__class__.__name__, ex)
+                    )
+                else:
+                    logging.info(
+                        "[%s] Current login user is %s"
+                        % (self.__class__.__name__, user_info.get("name", "Anonymous"))
+                    )
+            else:
+                logging.warning(
+                    "[%s] 接管成功但没读到 wr_vid，请先在该浏览器窗口里登录微信读书"
+                    % self.__class__.__name__
+                )
+
+        if force_login and not no_login:
+            await self.login()
+        if self._cookie.get("wr_vid") and not no_login:
+            await self.wait_for_avatar()
+        self._page.on("console", self.handle_log)
+
     async def launch(
         self,
         headless: bool = False,
@@ -239,7 +380,12 @@ class WeReadWebPage(object):
         use_default_profile: bool = False,
         mock_user_agent: bool = False,
         proxy_server: Optional[str] = None,
+        cdp_endpoint: Optional[str] = None,
+        no_login: bool = False,
     ) -> None:
+        if cdp_endpoint:
+            return await self._attach_browser(cdp_endpoint, force_login, no_login)
+        self._cdp_attached = False
         logging.info("[%s] Launch url %s" % (self.__class__.__name__, self._home_url))
         chrome: str = self._check_chrome()
 
@@ -253,6 +399,10 @@ class WeReadWebPage(object):
                 )
 
         args = ["--no-first-run", "--remote-allow-origins=*"]
+        if not proxy_server:
+            # 绕过系统代理（如 Clash 的 127.0.0.1:7897），否则 Chrome 继承系统代理
+            # 设置可能导致 weread 访问超时；需要代理时用 --proxy-server 显式指定
+            args.append("--no-proxy-server")
         if headless:
             args.append("--headless=new")
             if sys.platform == "linux" and os.getuid() == 0:
@@ -278,51 +428,7 @@ class WeReadWebPage(object):
             logLevel=logging.INFO,
         )
         self._page = (await self._browser.pages())[0]
-        await self._page.evaluateOnNewDocument(
-            """() => {
-            if (navigator.webdriver) {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => {
-                        console.log('navigator.webdriver is called');
-                        console.log(new Error().stack);
-                        return undefined;
-                    }
-                });
-                var _hasOwnProperty = Object.prototype.hasOwnProperty;
-                Object.prototype.hasOwnProperty = function (key) {
-                    if (key === 'webdriver') {
-                        console.log('hasOwnProperty', key, 'is called');
-                        console.log(new Error().stack);
-                        return false;
-                    }
-                    return _hasOwnProperty.call(this, key);
-                };
-                const originalQuery = navigator.permissions.query;
-                navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-                );
-            }
-            if (navigator.plugins.length === 0) {
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                });
-                Object.defineProperty(window, 'PluginArray', {
-                    get: () => Array,
-                });
-            }
-            if (navigator.languages.length === 0) {
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-            }
-            window.chrome = window.chrome || {
-                runtime: {},
-            };
-        }
-        """
-        )
+        await self._page.evaluateOnNewDocument(injections.STEALTH_PATCH_SCRIPT)
 
         await self._page.setViewport(
             {
@@ -331,13 +437,15 @@ class WeReadWebPage(object):
                 "deviceScaleFactor": 0.3,
             }
         )
-        detect_headless_result = await self._page.evaluate(DETECT_HEADLESS_SCRIPT)
+        detect_headless_result = await self._page.evaluate(
+            injections.DETECT_HEADLESS_SCRIPT
+        )
         if detect_headless_result:
             key = input("浏览器检测到Headless模式，继续执行可能导致帐号被封禁，是否继续执行？Y/n\n")
             if key != "Y":
                 raise utils.BreakExportingError()
 
-        if self._cookie.get("wr_vid"):
+        if self._cookie.get("wr_vid") and not self._no_login:
             try:
                 user_info = await self.get_user_info()
             except utils.InvalidUserError as ex:
@@ -350,20 +458,27 @@ class WeReadWebPage(object):
                     "[%s] Current login user is %s"
                     % (self.__class__.__name__, user_info.get("name", "Anonymous"))
                 )
-        if self._cookie:
+        if self._cookie and not self._no_login:
             await self._inject_cookie()
 
-        await self._page.goto(self._home_url)
+        await self._page.goto(
+            self._home_url, waitUntil="domcontentloaded", timeout=30000
+        )
         # await self.wait_for_selector("div.readerFooter a")
-        if force_login:
+        if force_login and not self._no_login:
             await self.login()
-        if self._cookie:
+        if self._cookie and not self._no_login:
             await self.wait_for_avatar()
         self._page.on("console", self.handle_log)
 
     async def close(self) -> None:
         if self._browser:
-            await self._browser.close()
+            if self._cdp_attached:
+                # 只断开连接。pyppeteer.connect 得到的 browser 调 close() 会发
+                # Browser.close 命令 —— 那是真的把用户的浏览器关掉，不能走那条路。
+                await self._browser.disconnect()
+            else:
+                await self._browser.close()
             self._browser = self._page = None
 
     async def get_html(self) -> str:
@@ -393,11 +508,42 @@ class WeReadWebPage(object):
             )
             raise ex
 
+    # 单个 console 日志文件的大小上限，超过即轮转（保留一代 .1 后重开）。
+    # 微信读书正文画在 canvas 上，console 会被 fillRect/fillStyle 疯狂刷屏——
+    # 实测 14.8 万行里唯一内容只有 333 行，无上限时单个 .log 能涨到十几 MB。
+    MAX_CONSOLE_LOG_BYTES = 4 * 1024 * 1024
+
     def handle_log(self, message: Any) -> None:
         text = message.text
         logging.info("[%s][Console] %s" % (self.__class__.__name__, text))
-        with open("%s.log" % self._book_id, "a+", encoding="utf-8") as fp:
-            fp.write("[%s] %s\n" % (self._url, text))
+        raw = "[%s] %s\n" % (self._url, text)
+        # 连续重复行折叠：只留第一条，重复次数补记在其后
+        if raw == self._last_console_line:
+            self._console_repeat += 1
+            return
+        out = raw
+        if self._console_repeat:
+            out = "[%s]     ^^^ 上一行重复 %d 次\n%s" % (
+                self._url,
+                self._console_repeat,
+                raw,
+            )
+            self._console_repeat = 0
+        self._last_console_line = raw
+        log_path = "%s.log" % self._book_id
+        if (
+            os.path.isfile(log_path)
+            and os.path.getsize(log_path) >= self.MAX_CONSOLE_LOG_BYTES
+        ):
+            # 先在被超限的文件末尾留一句说明，再整体归档为 .1，新文件从零开始
+            with open(log_path, "a", encoding="utf-8") as fp:
+                fp.write(
+                    "[%s] [console 日志达 %d 字节上限，本文件已归档为 %s.1，"
+                    "后续写入新文件]\n" % (self._url, self.MAX_CONSOLE_LOG_BYTES, log_path)
+                )
+            os.replace(log_path, log_path + ".1")
+        with open(log_path, "a", encoding="utf-8") as fp:
+            fp.write(out)
 
     async def wait_for_avatar(self, timeout: int = 30) -> None:
         time0 = time.time()
@@ -410,6 +556,45 @@ class WeReadWebPage(object):
             await asyncio.sleep(5)
         else:
             raise RuntimeError("Wait for avatar timeout")
+
+    async def is_verify_page(self) -> bool:
+        """判断当前页面是否被风控拦截。
+
+        只看可见的验证码 DOM 和 body 可见文本，不扫打包 JS 源码 —— 那是误报的根因。
+        """
+        try:
+            if await self._page.evaluate(injections.DETECT_CAPTCHA_SCRIPT):
+                return True
+            body_text = await self._page.evaluate(
+                "document.body.innerText.slice(0, 3000)"
+            )
+        except Exception:
+            return False
+        return any(marker in body_text for marker in VERIFY_TEXT_MARKERS)
+
+    async def wait_verify_cleared(self, timeout: int = 0, poll: float = 3.0) -> bool:
+        """撞到风控页时轮询等人工过码，不阻塞在 stdin 上。
+
+        脚本不接管输入，用户在浏览器窗口里自己过验证码，脚本感知到页面恢复后继续。
+        timeout 传 0 时用实例上的 self._verify_timeout。
+        """
+        if not await self.is_verify_page():
+            return True
+        timeout = timeout or self._verify_timeout
+        logging.warning(
+            "[%s] 检测到风控/验证码页面，请在浏览器窗口手动完成验证"
+            "（自动检测中，最长等待 %ds）" % (self.__class__.__name__, timeout)
+        )
+        waited = 0.0
+        while waited < timeout:
+            await asyncio.sleep(poll)
+            waited += poll
+            if not await self.is_verify_page():
+                logging.info("[%s] 验证已通过，继续抓取" % self.__class__.__name__)
+                await asyncio.sleep(1)
+                return True
+        logging.error("[%s] 等待验证超时（%ds）" % (self.__class__.__name__, timeout))
+        return False
 
     async def _inject_cookie(self) -> None:
         for key in self._cookie:
@@ -612,46 +797,40 @@ class WeReadWebPage(object):
         # self._page.on("request", self.handle_request)
 
     async def get_markdown(self) -> str:
-        script = "canvasContextHandler.data.complete;"
-        time0 = time.time()
-        while time.time() - time0 < 10:
-            result = await self._page.evaluate(script)
-            if result:
-                break
-            await asyncio.sleep(1)
-        script = "canvasContextHandler.data.markdown;"
-        result = await self._page.evaluate(script)
-        if not result:
-            await self._page.evaluate("canvasContextHandler.updateMarkdown();")
+        # 付费墙页面不会渲染 canvas 正文，hook 可能未初始化——容错返回空串，
+        # 由 export 层的 is_paywall_text 判定为付费墙并跳过该章
+        try:
+            script = "canvasContextHandler.data.complete;"
+            time0 = time.time()
+            while time.time() - time0 < 10:
+                result = await self._page.evaluate(script)
+                if result:
+                    break
+                await asyncio.sleep(1)
+            script = "canvasContextHandler.data.markdown;"
             result = await self._page.evaluate(script)
             if not result:
-                raise RuntimeError("Wait for creating markdown timeout")
-        return result
+                await self._page.evaluate("canvasContextHandler.updateMarkdown();")
+                result = await self._page.evaluate(script)
+                if not result:
+                    raise RuntimeError("Wait for creating markdown timeout")
+            return result
+        except pyppeteer.errors.ElementHandleError:
+            logging.warning(
+                "[%s] canvasContextHandler 未定义（疑似付费墙页面），返回空内容"
+                % self.__class__.__name__
+            )
+            return ""
 
     async def _check_next_page(self) -> None:
-        while True:
-            try:
-                await self.wait_for_selector("button.readerFooter_button", timeout=60)
-            except pyppeteer.errors.TimeoutError:
-                logging.info("[%s] load selector timeout " % self.__class__.__name__)
-                break
-            result = await self._page.evaluate(
-                "document.getElementsByClassName('readerFooter_button')[0].innerText;"
-            )
-            if result == "下一页":
-                logging.info("[%s] Go to next page" % self.__class__.__name__)
-                await self._page.evaluate(
-                    r"canvasContextHandler.data.markdown += '\n\n';"
-                )
-                await self.pre_load_page()
-                await self._page.click("button.readerFooter_button")
-                await asyncio.sleep(1)
-            elif result == "下一章":
-                break
-            elif result.startswith("登录"):
-                raise utils.LoginRequiredError()
-            else:
-                raise NotImplementedError(result)
+        # 当前微信读书网页版每章是一整页，"下一页"按钮实际是下一章入口——
+        # 原逻辑在这里循环点"下一页"会把整本书翻穿（可能翻到付费章）。
+        # 这里只等阅读器按钮出现（= 当前章正文已渲染完成）即返回，不翻页。
+        # 付费章由 export 层的 is_paywall_text 内容检测兜底跳过。
+        try:
+            await self.wait_for_selector("button.readerFooter_button", timeout=60)
+        except pyppeteer.errors.TimeoutError:
+            logging.info("[%s] load selector timeout" % self.__class__.__name__)
 
     def _get_chapter_url(self, chapter_id: str) -> str:
         return "%s%sk%s" % (
@@ -665,7 +844,15 @@ class WeReadWebPage(object):
         # await self.clear_cache()
         await self.pre_load_page()
         self._url = self._get_chapter_url(chapter_id)
-        await self._page.goto(self._url, timeout=1000 * timeout)
+        # 只等 DOM 就绪不等 load：reader 页面资源多，load 事件可能被拖到超时；
+        # 正文由 _check_next_page 等待「下一页」按钮兜底（按钮出现即正文已渲染）
+        await self._page.goto(
+            self._url, timeout=1000 * timeout, waitUntil="domcontentloaded"
+        )
+        if not await self.wait_verify_cleared():
+            raise utils.RiskControlError(
+                "Chapter %s blocked by risk control" % chapter_id
+            )
         try:
             await self._check_next_page()
         except utils.LoginRequiredError:
