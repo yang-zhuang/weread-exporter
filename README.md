@@ -18,7 +18,7 @@
 
 ## 本仓库相对上游做了什么
 
-以下相对上游基线 `80a9ccb` 统计（`git diff HEAD --stat`）：**代码与配置合计 +640 / −227 行**，另新增 5 个 `.py` 文件、1 个 `LICENSE` 与 1 个 `scripts/` 目录（16 个 `.sh`）。
+以下相对上游基线 `80a9ccb` 统计（`git diff --numstat --diff-filter=M 80a9ccb HEAD`，只计被修改的已有文件、不含新增）：**代码与配置合计 +615 / −227 行**，另新增 5 个 `.py` 文件、1 个 `LICENSE` 与 1 个 `scripts/` 目录（16 个 `.sh`）；`README.md` 自身另 +450 / −2。
 
 > 统计不含本文档自身——README 的增删是自指的，写进来会随文档更新立刻过期。
 
@@ -31,7 +31,7 @@
 | `weread_exporter/injections.py` | 85 | 注入浏览器的 JS 常量（stealth 补丁、headless/验证码探测） |
 | `tests/test_weread_exporter.py` | 449 | 回归测试，29 项，无网络无浏览器 |
 | `launch_chrome.py` | 115 | 接管模式：启动带调试端口的常驻 Chrome |
-| `LICENSE` | 25 | MIT 协议全文。上游只声明了 `license="MIT"` 却没附全文，本仓库补齐；版权行保留原作者 `drunkdream`，另列本 fork 的修改 |
+| `LICENSE` | 22 | MIT 协议全文。上游只声明了 `license="MIT"` 却没附全文，本仓库补齐；版权行为两行标准格式（`drunkdream` / `yang-zhuang`），不带额外缩进行——**这直接决定 GitHub 能否把许可证识别成 MIT** |
 | `scripts/*.sh` | 各 7~14 行 | 常用命令封装：注释头（用途 / 用法 / 逐参数解释）+ 一行 `python ...` 命令，覆盖本文档出现的全部用法（见「常用命令脚本」） |
 
 ### 修改文件
@@ -460,17 +460,18 @@ $ git ls-files -s cache              # 无输出 → git 索引里根本没有 c
 
 ## 许可
 
-本仓库遵循 **MIT** 许可，协议全文见 [`LICENSE`](LICENSE)。上游部分（原作者 **drunkdream** 及全部贡献者）的版权归原作者所有，本仓库修改部分的版权归本 fork 作者。`LICENSE` 的版权行分两段：
+本仓库遵循 **MIT** 许可，协议全文见 [`LICENSE`](LICENSE)。上游部分（原作者 **drunkdream** 及全部贡献者）的版权归原作者所有，本仓库修改部分的版权归本 fork 作者。`LICENSE` 的版权行为两行标准格式：
 
 ```
-Copyright (c) 2023 drunkdream (upstream project)
-Copyright (c) 2026 yang-zhuang (modifications in this fork)
+Copyright (c) 2023 drunkdream
+Copyright (c) 2026 yang-zhuang
 ```
 
-两点说明：
+三点说明：
 
-- **年份 2023 的依据**：上游仓库的起始提交是 `2023-02-11` 的 *Initial commit*（`GET /repos/drunkdream/weread-exporter/commits?until=2023-03-01`）。
+- **年份 2023 的依据**：上游仓库的起始提交是 `2023-02-11` 的 *Initial commit*（`GET /repos/drunkdream/weread-exporter/commits?until=2023-03-01` 可复现）。两位署名的项目地址见上文「本仓库的来历与致谢」。
 - **为什么要补全文**：上游只在 `setup.py` 里写了 `license="MIT"`，**从未附协议全文**——GitHub API 的 `GET /repos/drunkdream/weread-exporter/license` 返回 404，仓库根目录也没有 `LICENSE` 文件。而 MIT 条款本身就要求"上述版权声明和许可声明应包含在软件的**所有副本**中"，fork 对外分发正是"副本"，所以补一份全文既是合规要求，也让下游使用者有据可依。
+- **版权行必须写成标准单行格式**：即 `Copyright (c) <年份> <署名>`，一行一条。**不要**在版权行下方再补缩进的 URL 或备注行——GitHub 的许可证识别只会剥离以 `Copyright` 开头的行，残留的 URL 行会被计入协议正文，使整份文件与标准 MIT 文本不匹配，徽章会显示成 **Other**（API 里是 `NOASSERTION`）而非 MIT。这是实测踩到的坑：同样的正文，只因为多了两行缩进 URL，就被判成了 Other。
 
 ## 免责申明
 
